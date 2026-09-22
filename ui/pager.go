@@ -311,14 +311,12 @@ func (m pagerModel) helpView() (s string) {
 	s += "\n"
 	s += "k/↑      up                  " + col1[0] + "\n"
 	s += "j/↓      down                " + col1[1] + "\n"
-	s += "b/pgup   page up             " + col1[2] + "\n"
-	s += "f/pgdn   page down           " + col1[3] + "\n"
-	s += "u        ½ page up           " + col1[4] + "\n"
+	s += "h/←      left                " + col1[2] + "\n"
+	s += "l/→      right               " + col1[3] + "\n"
+	s += "b/pgup   page up             " + col1[4] + "\n"
+	s += "f/pgdn   page down           " + col1[5] + "\n"
+	s += "u        ½ page up           " + col1[6] + "\n"
 	s += "d        ½ page down         "
-
-	if len(col1) > 5 {
-		s += col1[5]
-	}
 
 	s = indent(s, 2)
 

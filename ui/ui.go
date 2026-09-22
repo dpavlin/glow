@@ -224,12 +224,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			return m, tea.Quit
 
-		case "left", "h", "delete":
-			if m.state == stateShowDocument {
-				cmds = append(cmds, m.unloadDocument()...)
-				return m, tea.Batch(cmds...)
-			}
-
 		case "ctrl+z":
 			return m, tea.Suspend
 
