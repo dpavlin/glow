@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/shell"
@@ -43,6 +44,8 @@ var (
 	showLineNumbers  bool
 	preserveNewLines bool
 	mouse            bool
+	tableWrap        bool
+	tableWidth       uint
 
 	rootCmd = &cobra.Command{
 		Use:   "glow [SOURCE|DIR]",
@@ -163,6 +166,30 @@ func validateStyle(style string) error {
 	return nil
 }
 
+func detectTerminalWidth() uint {
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+			return uint(w)
+		}
+	}
+	if term.IsTerminal(int(os.Stderr.Fd())) {
+		if w, _, err := term.GetSize(int(os.Stderr.Fd())); err == nil && w > 0 {
+			return uint(w)
+		}
+	}
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if w, _, err := term.GetSize(int(os.Stdin.Fd())); err == nil && w > 0 {
+			return uint(w)
+		}
+	}
+	if cols := os.Getenv("COLUMNS"); cols != "" {
+		if c, err := strconv.Atoi(cols); err == nil && c > 0 {
+			return uint(c)
+		}
+	}
+	return 0
+}
+
 func validateOptions(cmd *cobra.Command) error {
 	// grab config values from Viper
 	width = viper.GetUint("width")
@@ -172,6 +199,14 @@ func validateOptions(cmd *cobra.Command) error {
 	showAllFiles = viper.GetBool("all")
 	preserveNewLines = viper.GetBool("preserveNewLines")
 	showLineNumbers = viper.GetBool("showLineNumbers")
+	tableWrap = viper.GetBool("tableWrap")
+	if viper.IsSet("table_wrap") {
+		tableWrap = viper.GetBool("table_wrap")
+	}
+	tableWidth = viper.GetUint("tableWidth")
+	if viper.IsSet("table_width") {
+		tableWidth = viper.GetUint("table_width")
+	}
 
 	if pager && tui {
 		return errors.New("cannot use both pager and tui")
@@ -192,15 +227,8 @@ func validateOptions(cmd *cobra.Command) error {
 
 	// Detect terminal width
 	if !cmd.Flags().Changed("width") { //nolint:nestif
-		if isTerminal && width == 0 {
-			w, _, err := term.GetSize(int(os.Stdout.Fd()))
-			if err == nil {
-				width = uint(w) //nolint:gosec
-			}
-
-			if width > 120 {
-				width = 120
-			}
+		if width == 0 {
+			width = detectTerminalWidth()
 		}
 		if width == 0 {
 			width = 80
@@ -290,12 +318,21 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 	isCode := !utils.IsMarkdownFile(src.URL)
 
 	// initialize glamour
-	r, err := glamour.NewTermRenderer(
+	options := []glamour.TermRendererOption{
 		utils.GlamourStyle(style, isCode),
 		glamour.WithWordWrap(int(width)), //nolint:gosec
 		glamour.WithBaseURL(baseURL),
-		glamour.WithPreservedNewLines(),
-	)
+	}
+	if preserveNewLines {
+		options = append(options, glamour.WithPreservedNewLines())
+	}
+	if !tableWrap {
+		options = append(options, glamour.WithTableWrap(false), glamour.WithTableWidth(int(tableWidth)))
+	} else if cmd.Flags().Changed("table-width") || viper.IsSet("tableWidth") {
+		options = append(options, glamour.WithTableWidth(int(tableWidth)))
+	}
+
+	r, err := glamour.NewTermRenderer(options...)
 	if err != nil {
 		return fmt.Errorf("unable to create renderer: %w", err)
 	}
@@ -362,6 +399,8 @@ func runTUI(path string, content string) error {
 	cfg.GlamourMaxWidth = width
 	cfg.EnableMouse = mouse
 	cfg.PreserveNewLines = preserveNewLines
+	cfg.TableWrap = tableWrap
+	cfg.TableWidth = tableWidth
 
 	// Run Bubble Tea program
 	if _, err := ui.NewProgram(cfg, content).Run(); err != nil {
@@ -406,6 +445,8 @@ func init() {
 	rootCmd.Flags().BoolVarP(&showLineNumbers, "line-numbers", "l", false, "show line numbers (TUI-mode only)")
 	rootCmd.Flags().BoolVarP(&preserveNewLines, "preserve-new-lines", "n", false, "preserve newlines in the output")
 	rootCmd.Flags().BoolVarP(&mouse, "mouse", "m", false, "enable mouse wheel (TUI-mode only)")
+	rootCmd.Flags().BoolVar(&tableWrap, "table-wrap", true, "wrap table cell content (use --table-wrap=false to keep tables unwrapped)")
+	rootCmd.Flags().UintVar(&tableWidth, "table-width", 0, "explicit width for tables (set to 0 for natural content width)")
 	_ = rootCmd.Flags().MarkHidden("mouse")
 
 	// Config bindings
@@ -418,10 +459,14 @@ func init() {
 	_ = viper.BindPFlag("preserveNewLines", rootCmd.Flags().Lookup("preserve-new-lines"))
 	_ = viper.BindPFlag("showLineNumbers", rootCmd.Flags().Lookup("line-numbers"))
 	_ = viper.BindPFlag("all", rootCmd.Flags().Lookup("all"))
+	_ = viper.BindPFlag("tableWrap", rootCmd.Flags().Lookup("table-wrap"))
+	_ = viper.BindPFlag("tableWidth", rootCmd.Flags().Lookup("table-width"))
 
 	viper.SetDefault("style", "auto")
 	viper.SetDefault("width", 0)
 	viper.SetDefault("all", true)
+	viper.SetDefault("tableWrap", true)
+	viper.SetDefault("tableWidth", 0)
 
 	rootCmd.AddCommand(configCmd, manCmd)
 }

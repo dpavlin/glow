@@ -372,6 +372,11 @@ func glamourRender(m pagerModel, markdown string) (string, error) {
 	if m.common.cfg.PreserveNewLines {
 		options = append(options, glamour.WithPreservedNewLines())
 	}
+	if !m.common.cfg.TableWrap {
+		options = append(options, glamour.WithTableWrap(false), glamour.WithTableWidth(int(m.common.cfg.TableWidth)))
+	} else if m.common.cfg.TableWidth > 0 {
+		options = append(options, glamour.WithTableWidth(int(m.common.cfg.TableWidth)))
+	}
 	r, err := glamour.NewTermRenderer(options...)
 	if err != nil {
 		return "", fmt.Errorf("error creating glamour renderer: %w", err)

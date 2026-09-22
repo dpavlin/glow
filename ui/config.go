@@ -10,6 +10,8 @@ type Config struct {
 	GlamourStyle     string `env:"GLAMOUR_STYLE"`
 	EnableMouse      bool
 	PreserveNewLines bool
+	TableWrap        bool `env:"GLOW_TABLE_WRAP" envDefault:"true"`
+	TableWidth       uint `env:"GLOW_TABLE_WIDTH"`
 
 	// Working directory or file path
 	Path string
