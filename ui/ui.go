@@ -191,10 +191,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.BackgroundColorMsg:
 		m.common.styles = newStyles(msg.IsDark())
 		m.stash.stylePaginators(m.common.styles)
+		m.pager.updateStyles(m.common.styles)
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc":
-			if m.state == stateShowDocument || m.stash.viewState == stashStateLoadingDocument {
+			if m.state == stateShowDocument {
+				if m.pager.state == pagerStateSearching || m.pager.state == pagerStateFiltering || m.pager.hasSearchHighlights() || m.pager.isFiltered() {
+					var cmd tea.Cmd
+					m.pager, cmd = m.pager.update(msg)
+					return m, cmd
+				}
+				batch := m.unloadDocument()
+				return m, tea.Batch(batch...)
+			} else if m.stash.viewState == stashStateLoadingDocument {
 				batch := m.unloadDocument()
 				return m, tea.Batch(batch...)
 			}
@@ -208,6 +217,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.stash.markdowns = nil
 				return m, m.Init()
+			} else if m.state == stateShowDocument {
+				if m.pager.state == pagerStateSearching || m.pager.state == pagerStateFiltering {
+					m.pager, cmd = m.pager.update(msg)
+					return m, cmd
+				}
 			}
 
 		case "q":
@@ -218,6 +232,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// pass through all keys if we're editing the filter
 				if m.stash.filterState == filtering {
 					m.stash, cmd = m.stash.update(msg)
+					return m, cmd
+				}
+			case stateShowDocument:
+				if m.pager.state == pagerStateSearching || m.pager.state == pagerStateFiltering {
+					m.pager, cmd = m.pager.update(msg)
 					return m, cmd
 				}
 			}

@@ -529,7 +529,7 @@ func (m *stashModel) handleDocumentBrowsing(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, m.openMarkdown(md))
 
 		// Filter your notes
-		case "/":
+		case "/", "&":
 			m.hideStatusMessage()
 
 			// Build values we'll filter against

@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
@@ -14,6 +16,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/log"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/fsnotify/fsnotify"
 	runewidth "github.com/mattn/go-runewidth"
 	"github.com/muesli/reflow/ansi"
@@ -38,7 +41,15 @@ type pagerState int
 const (
 	pagerStateBrowse pagerState = iota
 	pagerStateStatusMessage
+	pagerStateSearching
+	pagerStateFiltering
 )
+
+type searchMatch struct {
+	line     int
+	colStart int
+	colEnd   int
+}
 
 type pagerModel struct {
 	common   *commonModel
@@ -48,6 +59,21 @@ type pagerModel struct {
 
 	statusMessage      string
 	statusMessageTimer *time.Timer
+
+	// Search and filter input
+	promptInput textinput.Model
+
+	// Unfiltered lines rendered by Glamour
+	fullLines []string
+
+	// Filter state
+	filterPattern string
+	filteredLines []string
+
+	// Search state
+	searchPattern     string
+	searchMatches     []searchMatch
+	currentMatchIndex int
 
 	// Current document being rendered, sans-glamour rendering. We cache
 	// it here so we can re-render it on resize.
@@ -60,13 +86,35 @@ func newPagerModel(common *commonModel) pagerModel {
 	// Init viewport
 	vp := viewport.New()
 
+	promptInput := textinput.New()
+	promptInput.Prompt = "/"
+	promptInput.SetVirtualCursor(true)
+	tsi := promptInput.Styles()
+	tsi.Focused.Prompt = common.styles.stashInputPromptStyle
+	tsi.Blurred.Prompt = common.styles.stashInputPromptStyle
+	tsi.Cursor.Color = common.styles.fuchsia
+	promptInput.SetStyles(tsi)
+
 	m := pagerModel{
-		common:   common,
-		state:    pagerStateBrowse,
-		viewport: vp,
+		common:            common,
+		state:             pagerStateBrowse,
+		viewport:          vp,
+		promptInput:       promptInput,
+		currentMatchIndex: -1,
 	}
 	m.initWatcher()
 	return m
+}
+
+func (m *pagerModel) updateStyles(styles Styles) {
+	tsi := m.promptInput.Styles()
+	tsi.Focused.Prompt = styles.stashInputPromptStyle
+	tsi.Blurred.Prompt = styles.stashInputPromptStyle
+	tsi.Cursor.Color = styles.fuchsia
+	m.promptInput.SetStyles(tsi)
+	if m.hasSearchHighlights() {
+		m.updateDisplayedContent()
+	}
 }
 
 func (m *pagerModel) setSize(w, h int) {
@@ -81,8 +129,49 @@ func (m *pagerModel) setSize(w, h int) {
 	}
 }
 
+func (m *pagerModel) isFiltered() bool {
+	return m.filterPattern != ""
+}
+
+func (m *pagerModel) hasSearchHighlights() bool {
+	return len(m.searchMatches) > 0
+}
+
+func (m *pagerModel) baseLines() []string {
+	if m.isFiltered() {
+		return m.filteredLines
+	}
+	return m.fullLines
+}
+
+func (m *pagerModel) updateDisplayedContent() {
+	base := m.baseLines()
+	if m.hasSearchHighlights() {
+		highlighted := applyHighlights(base, m.searchMatches, m.currentMatchIndex, m.common.styles.highlightStyle, m.common.styles.selectedHighlightStyle)
+		m.viewport.SetContentLines(highlighted)
+	} else {
+		m.viewport.SetContentLines(base)
+	}
+}
+
 func (m *pagerModel) setContent(s string) {
-	m.viewport.SetContent(s)
+	m.fullLines = strings.Split(s, "\n")
+	if m.isFiltered() {
+		re := compileSearchRegex(m.filterPattern)
+		if re != nil {
+			var filtered []string
+			for _, line := range m.fullLines {
+				if re.MatchString(xansi.Strip(line)) {
+					filtered = append(filtered, line)
+				}
+			}
+			m.filteredLines = filtered
+		}
+	}
+	if m.searchPattern != "" {
+		m.recomputeSearchMatches()
+	}
+	m.updateDisplayedContent()
 }
 
 func (m *pagerModel) toggleHelp() {
@@ -122,8 +211,15 @@ func (m *pagerModel) unload() {
 		m.statusMessageTimer.Stop()
 	}
 	m.state = pagerStateBrowse
+	m.fullLines = nil
+	m.filteredLines = nil
+	m.filterPattern = ""
+	m.searchMatches = nil
+	m.searchPattern = ""
+	m.currentMatchIndex = -1
 	m.viewport.SetContent("")
 	m.viewport.SetYOffset(0)
+	m.viewport.SetXOffset(0)
 	m.unwatchFile()
 }
 
@@ -135,12 +231,65 @@ func (m pagerModel) update(msg tea.Msg) (pagerModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
+		if m.state == pagerStateSearching || m.state == pagerStateFiltering {
+			switch msg.String() {
+			case keyEsc, "ctrl+c":
+				m.state = pagerStateBrowse
+				return m, nil
+			case keyEnter:
+				if m.state == pagerStateSearching {
+					return m.submitSearch()
+				}
+				return m.submitFilter()
+			default:
+				m.promptInput, cmd = m.promptInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		switch msg.String() {
-		case "q", keyEsc:
+		case "q":
 			if m.state != pagerStateBrowse {
 				m.state = pagerStateBrowse
 				return m, nil
 			}
+
+		case keyEsc:
+			if m.state != pagerStateBrowse {
+				m.state = pagerStateBrowse
+				return m, nil
+			}
+			if m.hasSearchHighlights() {
+				m.clearSearch()
+				return m, nil
+			}
+			if m.isFiltered() {
+				m.clearFilter()
+				return m, nil
+			}
+
+		case "/":
+			m.state = pagerStateSearching
+			m.promptInput.Prompt = "/"
+			m.promptInput.SetValue("")
+			m.promptInput.Focus()
+			return m, textinput.Blink
+
+		case "&":
+			m.state = pagerStateFiltering
+			m.promptInput.Prompt = "&"
+			m.promptInput.SetValue("")
+			m.promptInput.Focus()
+			return m, textinput.Blink
+
+		case "n":
+			m.nextMatch()
+			return m, nil
+
+		case "N":
+			m.prevMatch()
+			return m, nil
+
 		case "home", "g":
 			m.viewport.GotoTop()
 		case "end", "G":
@@ -210,6 +359,171 @@ func (m pagerModel) update(msg tea.Msg) (pagerModel, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m *pagerModel) submitSearch() (pagerModel, tea.Cmd) {
+	pattern := strings.TrimSpace(m.promptInput.Value())
+	if pattern == "" {
+		if m.searchPattern != "" {
+			pattern = m.searchPattern
+		} else {
+			m.clearSearch()
+			m.state = pagerStateBrowse
+			return *m, nil
+		}
+	}
+
+	re := compileSearchRegex(pattern)
+	if re == nil {
+		m.state = pagerStateBrowse
+		return *m, nil
+	}
+
+	m.searchPattern = pattern
+	base := m.baseLines()
+	var matches []searchMatch
+	for i, line := range base {
+		stripped := xansi.Strip(line)
+		locs := re.FindAllStringIndex(stripped, -1)
+		for _, loc := range locs {
+			matches = append(matches, searchMatch{line: i, colStart: loc[0], colEnd: loc[1]})
+		}
+	}
+
+	if len(matches) == 0 {
+		m.clearSearch()
+		m.state = pagerStateBrowse
+		return *m, m.showStatusMessage(pagerStatusMessage{fmt.Sprintf("Pattern not found: %s", pattern), false})
+	}
+
+	m.searchMatches = matches
+	matchIdx := 0
+	for idx, match := range matches {
+		if match.line >= m.viewport.YOffset() {
+			matchIdx = idx
+			break
+		}
+	}
+	m.currentMatchIndex = matchIdx
+	m.updateDisplayedContent()
+	m.scrollToCurrentMatch()
+	m.state = pagerStateBrowse
+	return *m, nil
+}
+
+func (m *pagerModel) submitFilter() (pagerModel, tea.Cmd) {
+	pattern := strings.TrimSpace(m.promptInput.Value())
+	if pattern == "" {
+		m.clearFilter()
+		m.state = pagerStateBrowse
+		return *m, nil
+	}
+
+	re := compileSearchRegex(pattern)
+	if re == nil {
+		m.state = pagerStateBrowse
+		return *m, nil
+	}
+
+	var filtered []string
+	for _, line := range m.fullLines {
+		if re.MatchString(xansi.Strip(line)) {
+			filtered = append(filtered, line)
+		}
+	}
+
+	if len(filtered) == 0 {
+		m.state = pagerStateBrowse
+		return *m, m.showStatusMessage(pagerStatusMessage{fmt.Sprintf("No matching lines: %s", pattern), false})
+	}
+
+	m.filterPattern = pattern
+	m.filteredLines = filtered
+	m.recomputeSearchMatches()
+	m.updateDisplayedContent()
+	m.viewport.GotoTop()
+	m.state = pagerStateBrowse
+	return *m, nil
+}
+
+func (m *pagerModel) recomputeSearchMatches() {
+	if m.searchPattern == "" {
+		m.searchMatches = nil
+		m.currentMatchIndex = -1
+		return
+	}
+	re := compileSearchRegex(m.searchPattern)
+	if re == nil {
+		m.searchMatches = nil
+		m.currentMatchIndex = -1
+		return
+	}
+	base := m.baseLines()
+	var matches []searchMatch
+	for i, line := range base {
+		stripped := xansi.Strip(line)
+		locs := re.FindAllStringIndex(stripped, -1)
+		for _, loc := range locs {
+			matches = append(matches, searchMatch{line: i, colStart: loc[0], colEnd: loc[1]})
+		}
+	}
+	m.searchMatches = matches
+	if len(matches) == 0 {
+		m.currentMatchIndex = -1
+	} else if m.currentMatchIndex >= len(matches) || m.currentMatchIndex < 0 {
+		m.currentMatchIndex = 0
+	}
+}
+
+func (m *pagerModel) clearSearch() {
+	m.searchPattern = ""
+	m.searchMatches = nil
+	m.currentMatchIndex = -1
+	m.updateDisplayedContent()
+}
+
+func (m *pagerModel) clearFilter() {
+	m.filterPattern = ""
+	m.filteredLines = nil
+	m.recomputeSearchMatches()
+	m.updateDisplayedContent()
+}
+
+func (m *pagerModel) nextMatch() {
+	if len(m.searchMatches) == 0 {
+		return
+	}
+	m.currentMatchIndex = (m.currentMatchIndex + 1) % len(m.searchMatches)
+	m.updateDisplayedContent()
+	m.scrollToCurrentMatch()
+}
+
+func (m *pagerModel) prevMatch() {
+	if len(m.searchMatches) == 0 {
+		return
+	}
+	m.currentMatchIndex = (m.currentMatchIndex - 1 + len(m.searchMatches)) % len(m.searchMatches)
+	m.updateDisplayedContent()
+	m.scrollToCurrentMatch()
+}
+
+func (m *pagerModel) scrollToCurrentMatch() {
+	if m.currentMatchIndex < 0 || m.currentMatchIndex >= len(m.searchMatches) {
+		return
+	}
+	match := m.searchMatches[m.currentMatchIndex]
+	vpHeight := max(1, m.viewport.Height())
+	yOff := m.viewport.YOffset()
+	if match.line < yOff || match.line >= yOff+vpHeight {
+		targetY := max(0, match.line-vpHeight/3)
+		m.viewport.SetYOffset(targetY)
+	}
+
+	vpWidth := max(1, m.viewport.Width())
+	xOff := m.viewport.XOffset()
+	if match.colEnd > xOff+vpWidth || match.colStart < xOff {
+		m.viewport.SetXOffset(max(0, match.colStart-4))
+	}
+}
+
 func (m pagerModel) View() string {
 	var b strings.Builder
 	fmt.Fprint(&b, m.viewport.View()+"\n")
@@ -225,6 +539,19 @@ func (m pagerModel) View() string {
 }
 
 func (m pagerModel) statusBarView(b *strings.Builder) {
+	styles := m.common.styles
+	logo := glowLogoView(m.common.styles)
+
+	if m.state == pagerStateSearching || m.state == pagerStateFiltering {
+		inputView := m.promptInput.View()
+		inputWidth := ansi.PrintableRuneWidth(inputView)
+		padding := max(0, m.common.width-ansi.PrintableRuneWidth(logo)-inputWidth-1)
+		emptySpace := strings.Repeat(" ", padding)
+		emptySpace = styles.statusBarNoteStyle(emptySpace)
+		fmt.Fprintf(b, "%s %s%s", logo, inputView, emptySpace)
+		return
+	}
+
 	const (
 		minPercent               float64 = 0.0
 		maxPercent               float64 = 1.0
@@ -232,10 +559,6 @@ func (m pagerModel) statusBarView(b *strings.Builder) {
 	)
 
 	showStatusMessage := m.state == pagerStateStatusMessage
-	styles := m.common.styles
-
-	// Logo
-	logo := glowLogoView(m.common.styles)
 
 	// Scroll percent
 	percent := math.Max(minPercent, math.Min(maxPercent, m.viewport.ScrollPercent()))
@@ -260,6 +583,13 @@ func (m pagerModel) statusBarView(b *strings.Builder) {
 		note = m.statusMessage
 	} else {
 		note = m.currentDocument.Note
+		if m.isFiltered() && len(m.searchMatches) > 0 {
+			note = fmt.Sprintf("%s • &%s • [%d/%d] /%s", note, m.filterPattern, m.currentMatchIndex+1, len(m.searchMatches), m.searchPattern)
+		} else if m.isFiltered() {
+			note = fmt.Sprintf("%s • &%s (%d lines)", note, m.filterPattern, len(m.baseLines()))
+		} else if len(m.searchMatches) > 0 {
+			note = fmt.Sprintf("%s • [%d/%d] /%s", note, m.currentMatchIndex+1, len(m.searchMatches), m.searchPattern)
+		}
 	}
 	note = truncate.StringWithTail(" "+note+" ", uint(max(0, //nolint:gosec
 		m.common.width-
@@ -299,12 +629,15 @@ func (m pagerModel) statusBarView(b *strings.Builder) {
 
 func (m pagerModel) helpView() (s string) {
 	col1 := []string{
+		"/       search",
+		"n/N     next/prev match",
+		"&       filter lines",
 		"g/home  go to top",
 		"G/end   go to bottom",
 		"c       copy contents",
 		"e       edit this document",
 		"r       reload this document",
-		"esc     back to files",
+		"esc     back to files / clear",
 		"q       quit",
 	}
 
@@ -316,7 +649,9 @@ func (m pagerModel) helpView() (s string) {
 	s += "b/pgup   page up             " + col1[4] + "\n"
 	s += "f/pgdn   page down           " + col1[5] + "\n"
 	s += "u        ½ page up           " + col1[6] + "\n"
-	s += "d        ½ page down         "
+	s += "d        ½ page down         " + col1[7] + "\n"
+	s += "                             " + col1[8] + "\n"
+	s += "                             " + col1[9]
 
 	s = indent(s, 2)
 
@@ -467,4 +802,60 @@ func (m *pagerModel) unwatchFile() {
 
 func (m *pagerModel) localDir() string {
 	return filepath.Dir(m.currentDocument.localPath)
+}
+
+func applyHighlights(lines []string, matches []searchMatch, currentIdx int, hlStyle, selStyle lipgloss.Style) []string {
+	if len(matches) == 0 {
+		return lines
+	}
+	res := make([]string, len(lines))
+	copy(res, lines)
+
+	lineMatches := make(map[int][]searchMatch)
+	for _, m := range matches {
+		lineMatches[m.line] = append(lineMatches[m.line], m)
+	}
+
+	for lineIdx, lMatches := range lineMatches {
+		if lineIdx < 0 || lineIdx >= len(lines) {
+			continue
+		}
+		ranges := make([]lipgloss.Range, 0, len(lMatches))
+		for _, m := range lMatches {
+			st := hlStyle
+			if currentIdx >= 0 && currentIdx < len(matches) && matches[currentIdx] == m {
+				st = selStyle
+			}
+			ranges = append(ranges, lipgloss.NewRange(m.colStart, m.colEnd, st))
+		}
+		res[lineIdx] = lipgloss.StyleRanges(lines[lineIdx], ranges...)
+	}
+
+	return res
+}
+
+func compileSearchRegex(pattern string) *regexp.Regexp {
+	if pattern == "" {
+		return nil
+	}
+	hasUpper := strings.ToLower(pattern) != pattern
+	var expr string
+	if hasUpper {
+		expr = pattern
+	} else {
+		expr = "(?i)" + pattern
+	}
+	re, err := regexp.Compile(expr)
+	if err != nil {
+		if hasUpper {
+			expr = regexp.QuoteMeta(pattern)
+		} else {
+			expr = "(?i)" + regexp.QuoteMeta(pattern)
+		}
+		re, err = regexp.Compile(expr)
+		if err != nil {
+			return nil
+		}
+	}
+	return re
 }

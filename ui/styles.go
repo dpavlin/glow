@@ -50,6 +50,8 @@ type Styles struct {
 	logoStyle             lipgloss.Style
 	stashSpinnerStyle     lipgloss.Style
 	stashInputPromptStyle lipgloss.Style
+	highlightStyle         lipgloss.Style
+	selectedHighlightStyle lipgloss.Style
 }
 
 // newStyles builds all styles for the given terminal background.
@@ -158,6 +160,15 @@ func newStyles(isDark bool) Styles {
 	s.stashInputPromptStyle = lipgloss.NewStyle().
 		Foreground(yellowGreen).
 		MarginRight(1)
+
+	s.highlightStyle = lipgloss.NewStyle().
+		Background(yellowGreen).
+		Foreground(s.adaptive("#FFFFFF", "#000000"))
+
+	s.selectedHighlightStyle = lipgloss.NewStyle().
+		Background(s.fuchsia).
+		Foreground(s.adaptive("#FFFFFF", "#000000")).
+		Bold(true)
 
 	return s
 }
