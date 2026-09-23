@@ -196,7 +196,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			if m.state == stateShowDocument {
-				if m.pager.state == pagerStateSearching || m.pager.state == pagerStateFiltering || m.pager.hasSearchHighlights() || m.pager.isFiltered() {
+				if m.pager.inputActive() || m.pager.hasSearchHighlights() || m.pager.isFiltered() {
 					var cmd tea.Cmd
 					m.pager, cmd = m.pager.update(msg)
 					return m, cmd
@@ -218,7 +218,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.stash.markdowns = nil
 				return m, m.Init()
 			} else if m.state == stateShowDocument {
-				if m.pager.state == pagerStateSearching || m.pager.state == pagerStateFiltering {
+				if m.pager.inputActive() {
 					m.pager, cmd = m.pager.update(msg)
 					return m, cmd
 				}
@@ -235,7 +235,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, cmd
 				}
 			case stateShowDocument:
-				if m.pager.state == pagerStateSearching || m.pager.state == pagerStateFiltering {
+				if m.pager.inputActive() {
 					m.pager, cmd = m.pager.update(msg)
 					return m, cmd
 				}

@@ -7,6 +7,7 @@ import (
 	"charm.land/glamour/v2"
 	"charm.land/glow/v3/utils"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/spf13/viper"
 )
 
 func TestGlowFlags(t *testing.T) {
@@ -57,6 +58,43 @@ func TestGlowFlags(t *testing.T) {
 	}
 }
 
+// A config file must never override a flag passed on the command line.
+func TestResolveTableSettingsPrecedence(t *testing.T) {
+	// Put the snake_case keys in viper's *config* layer, which is where a real
+	// glow.yml ends up. viper.Set would be an override, and overrides outrank
+	// flags, so it would not model the real situation.
+	viper.SetConfigType("yaml")
+	if err := viper.MergeConfig(strings.NewReader("table_wrap: false\ntable_width: 0\n")); err != nil {
+		t.Fatalf("merge config: %v", err)
+	}
+	t.Cleanup(func() {
+		viper.Set("table_wrap", nil)
+		viper.Set("table_width", nil)
+	})
+
+	// Flags explicitly given: they win over the config file.
+	if err := rootCmd.ParseFlags([]string{"--table-wrap=true", "--table-width", "80"}); err != nil {
+		t.Fatal(err)
+	}
+	wrap, width := resolveTableSettings(rootCmd.Flags().Changed)
+	if !wrap {
+		t.Errorf("--table-wrap=true should beat table_wrap: false, got wrap=%v", wrap)
+	}
+	if width != 80 {
+		t.Errorf("--table-width 80 should beat table_width: 0, got width=%d", width)
+	}
+
+	// No flags given: the config file still applies.
+	neverChanged := func(string) bool { return false }
+	wrap, width = resolveTableSettings(neverChanged)
+	if wrap {
+		t.Errorf("table_wrap: false should apply when no flag is given, got wrap=%v", wrap)
+	}
+	if width != 0 {
+		t.Errorf("table_width: 0 should apply when no flag is given, got width=%d", width)
+	}
+}
+
 func TestTableUnwrappedWithTextWrapped(t *testing.T) {
 	md := `This is a long introductory paragraph that should wrap nicely at sixty characters terminal width while the table below extends horizontally without wrapping.
 
@@ -89,5 +127,3 @@ func TestTableUnwrappedWithTextWrapped(t *testing.T) {
 		t.Fatalf("table was truncated with ellipsis:\n%s", clean)
 	}
 }
-
-

@@ -66,12 +66,16 @@ type pagerModel struct {
 	// Unfiltered lines rendered by Glamour
 	fullLines []string
 
-	// Filter state
+	// Filter state. filterRE is the compiled filterPattern, cached so that
+	// re-rendering (resize, reload, edit) does not recompile it.
 	filterPattern string
+	filterRE      *regexp.Regexp
 	filteredLines []string
 
-	// Search state
+	// Search state. searchRE is the compiled searchPattern, cached for the same
+	// reason. Match positions are display-cell coordinates, not byte offsets.
 	searchPattern     string
+	searchRE          *regexp.Regexp
 	searchMatches     []searchMatch
 	currentMatchIndex int
 
@@ -137,6 +141,12 @@ func (m *pagerModel) hasSearchHighlights() bool {
 	return len(m.searchMatches) > 0
 }
 
+// inputActive reports whether the pager is taking search or filter input, in
+// which case keystrokes belong to the text input rather than to scrolling.
+func (m *pagerModel) inputActive() bool {
+	return m.state == pagerStateSearching || m.state == pagerStateFiltering
+}
+
 func (m *pagerModel) baseLines() []string {
 	if m.isFiltered() {
 		return m.filteredLines
@@ -156,19 +166,10 @@ func (m *pagerModel) updateDisplayedContent() {
 
 func (m *pagerModel) setContent(s string) {
 	m.fullLines = strings.Split(s, "\n")
-	if m.isFiltered() {
-		re := compileSearchRegex(m.filterPattern)
-		if re != nil {
-			var filtered []string
-			for _, line := range m.fullLines {
-				if re.MatchString(xansi.Strip(line)) {
-					filtered = append(filtered, line)
-				}
-			}
-			m.filteredLines = filtered
-		}
+	if m.isFiltered() && m.filterRE != nil {
+		m.filteredLines = filterLines(m.filterRE, m.fullLines)
 	}
-	if m.searchPattern != "" {
+	if m.searchRE != nil {
 		m.recomputeSearchMatches()
 	}
 	m.updateDisplayedContent()
@@ -214,8 +215,10 @@ func (m *pagerModel) unload() {
 	m.fullLines = nil
 	m.filteredLines = nil
 	m.filterPattern = ""
+	m.filterRE = nil
 	m.searchMatches = nil
 	m.searchPattern = ""
+	m.searchRE = nil
 	m.currentMatchIndex = -1
 	m.viewport.SetContent("")
 	m.viewport.SetYOffset(0)
@@ -231,7 +234,7 @@ func (m pagerModel) update(msg tea.Msg) (pagerModel, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
-		if m.state == pagerStateSearching || m.state == pagerStateFiltering {
+		if m.inputActive() {
 			switch msg.String() {
 			case keyEsc, "ctrl+c":
 				m.state = pagerStateBrowse
@@ -377,36 +380,33 @@ func (m *pagerModel) submitSearch() (pagerModel, tea.Cmd) {
 		return *m, nil
 	}
 
-	m.searchPattern = pattern
-	base := m.baseLines()
-	var matches []searchMatch
-	for i, line := range base {
-		stripped := xansi.Strip(line)
-		locs := re.FindAllStringIndex(stripped, -1)
-		for _, loc := range locs {
-			matches = append(matches, searchMatch{line: i, colStart: loc[0], colEnd: loc[1]})
-		}
-	}
-
+	matches := findMatches(re, m.baseLines())
 	if len(matches) == 0 {
 		m.clearSearch()
 		m.state = pagerStateBrowse
 		return *m, m.showStatusMessage(pagerStatusMessage{fmt.Sprintf("Pattern not found: %s", pattern), false})
 	}
 
+	m.searchPattern = pattern
+	m.searchRE = re
 	m.searchMatches = matches
-	matchIdx := 0
-	for idx, match := range matches {
-		if match.line >= m.viewport.YOffset() {
-			matchIdx = idx
-			break
-		}
-	}
-	m.currentMatchIndex = matchIdx
+	m.currentMatchIndex = firstMatchInView(matches, m.viewport.YOffset())
 	m.updateDisplayedContent()
 	m.scrollToCurrentMatch()
 	m.state = pagerStateBrowse
 	return *m, nil
+}
+
+// firstMatchInView returns the index of the first match at or below yOff. When
+// every match sits above the viewport we keep the last one rather than wrapping
+// to the first, which would yank the reader back to the top of the document.
+func firstMatchInView(matches []searchMatch, yOff int) int {
+	for idx, match := range matches {
+		if match.line >= yOff {
+			return idx
+		}
+	}
+	return len(matches) - 1
 }
 
 func (m *pagerModel) submitFilter() (pagerModel, tea.Cmd) {
@@ -423,19 +423,14 @@ func (m *pagerModel) submitFilter() (pagerModel, tea.Cmd) {
 		return *m, nil
 	}
 
-	var filtered []string
-	for _, line := range m.fullLines {
-		if re.MatchString(xansi.Strip(line)) {
-			filtered = append(filtered, line)
-		}
-	}
-
+	filtered := filterLines(re, m.fullLines)
 	if len(filtered) == 0 {
 		m.state = pagerStateBrowse
 		return *m, m.showStatusMessage(pagerStatusMessage{fmt.Sprintf("No matching lines: %s", pattern), false})
 	}
 
 	m.filterPattern = pattern
+	m.filterRE = re
 	m.filteredLines = filtered
 	m.recomputeSearchMatches()
 	m.updateDisplayedContent()
@@ -445,36 +440,24 @@ func (m *pagerModel) submitFilter() (pagerModel, tea.Cmd) {
 }
 
 func (m *pagerModel) recomputeSearchMatches() {
-	if m.searchPattern == "" {
+	if m.searchPattern == "" || m.searchRE == nil {
 		m.searchMatches = nil
 		m.currentMatchIndex = -1
 		return
 	}
-	re := compileSearchRegex(m.searchPattern)
-	if re == nil {
-		m.searchMatches = nil
+
+	m.searchMatches = findMatches(m.searchRE, m.baseLines())
+	switch {
+	case len(m.searchMatches) == 0:
 		m.currentMatchIndex = -1
-		return
-	}
-	base := m.baseLines()
-	var matches []searchMatch
-	for i, line := range base {
-		stripped := xansi.Strip(line)
-		locs := re.FindAllStringIndex(stripped, -1)
-		for _, loc := range locs {
-			matches = append(matches, searchMatch{line: i, colStart: loc[0], colEnd: loc[1]})
-		}
-	}
-	m.searchMatches = matches
-	if len(matches) == 0 {
-		m.currentMatchIndex = -1
-	} else if m.currentMatchIndex >= len(matches) || m.currentMatchIndex < 0 {
+	case m.currentMatchIndex >= len(m.searchMatches) || m.currentMatchIndex < 0:
 		m.currentMatchIndex = 0
 	}
 }
 
 func (m *pagerModel) clearSearch() {
 	m.searchPattern = ""
+	m.searchRE = nil
 	m.searchMatches = nil
 	m.currentMatchIndex = -1
 	m.updateDisplayedContent()
@@ -482,6 +465,7 @@ func (m *pagerModel) clearSearch() {
 
 func (m *pagerModel) clearFilter() {
 	m.filterPattern = ""
+	m.filterRE = nil
 	m.filteredLines = nil
 	m.recomputeSearchMatches()
 	m.updateDisplayedContent()
@@ -583,12 +567,15 @@ func (m pagerModel) statusBarView(b *strings.Builder) {
 		note = m.statusMessage
 	} else {
 		note = m.currentDocument.Note
-		if m.isFiltered() && len(m.searchMatches) > 0 {
-			note = fmt.Sprintf("%s • &%s • [%d/%d] /%s", note, m.filterPattern, m.currentMatchIndex+1, len(m.searchMatches), m.searchPattern)
-		} else if m.isFiltered() {
+		// Clamp the counter: a -1 index must not render as "0/N".
+		matchPos := max(1, min(m.currentMatchIndex+1, len(m.searchMatches)))
+		switch {
+		case m.isFiltered() && len(m.searchMatches) > 0:
+			note = fmt.Sprintf("%s • &%s • [%d/%d] /%s", note, m.filterPattern, matchPos, len(m.searchMatches), m.searchPattern)
+		case m.isFiltered():
 			note = fmt.Sprintf("%s • &%s (%d lines)", note, m.filterPattern, len(m.baseLines()))
-		} else if len(m.searchMatches) > 0 {
-			note = fmt.Sprintf("%s • [%d/%d] /%s", note, m.currentMatchIndex+1, len(m.searchMatches), m.searchPattern)
+		case len(m.searchMatches) > 0:
+			note = fmt.Sprintf("%s • [%d/%d] /%s", note, matchPos, len(m.searchMatches), m.searchPattern)
 		}
 	}
 	note = truncate.StringWithTail(" "+note+" ", uint(max(0, //nolint:gosec
@@ -705,11 +692,7 @@ func glamourRender(m pagerModel, markdown string) (string, error) {
 	if m.common.cfg.PreserveNewLines {
 		options = append(options, glamour.WithPreservedNewLines())
 	}
-	if !m.common.cfg.TableWrap {
-		options = append(options, glamour.WithTableWrap(false), glamour.WithTableWidth(int(m.common.cfg.TableWidth)))
-	} else if m.common.cfg.TableWidth > 0 {
-		options = append(options, glamour.WithTableWidth(int(m.common.cfg.TableWidth)))
-	}
+	options = append(options, utils.TableOptions(m.common.cfg.TableWrap, m.common.cfg.TableWidth)...)
 	r, err := glamour.NewTermRenderer(options...)
 	if err != nil {
 		return "", fmt.Errorf("error creating glamour renderer: %w", err)
@@ -804,6 +787,44 @@ func (m *pagerModel) localDir() string {
 	return filepath.Dir(m.currentDocument.localPath)
 }
 
+// filterLines keeps the lines whose visible text matches re. The surviving lines
+// are returned untouched, so glamour's styling on them is preserved.
+func filterLines(re *regexp.Regexp, lines []string) []string {
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if re.MatchString(xansi.Strip(line)) {
+			filtered = append(filtered, line)
+		}
+	}
+	return filtered
+}
+
+// findMatches locates every occurrence of re in lines and returns the positions
+// in *display cell* coordinates.
+//
+// This matters: regexp reports byte offsets, while lipgloss.StyleRanges cuts
+// with ansi.Cut, which indexes by cell width. Handing it byte offsets misplaces
+// every match that follows a multi-byte rune — and glamour output is full of
+// them, since a table's box-drawing "│" is three bytes wide. Wide (CJK) runes
+// break the rune-index assumption too, so cells are the only correct space.
+//
+// Cell widths are accumulated as the matches walk forward, keeping this linear in
+// the length of each line rather than quadratic in the number of matches.
+func findMatches(re *regexp.Regexp, lines []string) []searchMatch {
+	var matches []searchMatch
+	for i, line := range lines {
+		stripped := xansi.Strip(line)
+		prevByte, prevCell := 0, 0
+		for _, loc := range re.FindAllStringIndex(stripped, -1) {
+			start := prevCell + xansi.StringWidth(stripped[prevByte:loc[0]])
+			end := start + xansi.StringWidth(stripped[loc[0]:loc[1]])
+			matches = append(matches, searchMatch{line: i, colStart: start, colEnd: end})
+			prevByte, prevCell = loc[1], end
+		}
+	}
+	return matches
+}
+
 func applyHighlights(lines []string, matches []searchMatch, currentIdx int, hlStyle, selStyle lipgloss.Style) []string {
 	if len(matches) == 0 {
 		return lines
@@ -811,22 +832,26 @@ func applyHighlights(lines []string, matches []searchMatch, currentIdx int, hlSt
 	res := make([]string, len(lines))
 	copy(res, lines)
 
-	lineMatches := make(map[int][]searchMatch)
-	for _, m := range matches {
-		lineMatches[m.line] = append(lineMatches[m.line], m)
+	// Group the *indices* of the matches by line. Identifying the current match
+	// by comparing searchMatch values would mark every duplicate occurrence as
+	// current as well.
+	lineMatches := make(map[int][]int)
+	for idx, match := range matches {
+		lineMatches[match.line] = append(lineMatches[match.line], idx)
 	}
 
-	for lineIdx, lMatches := range lineMatches {
+	for lineIdx, idxs := range lineMatches {
 		if lineIdx < 0 || lineIdx >= len(lines) {
 			continue
 		}
-		ranges := make([]lipgloss.Range, 0, len(lMatches))
-		for _, m := range lMatches {
+		ranges := make([]lipgloss.Range, 0, len(idxs))
+		for _, idx := range idxs {
+			match := matches[idx]
 			st := hlStyle
-			if currentIdx >= 0 && currentIdx < len(matches) && matches[currentIdx] == m {
+			if idx == currentIdx {
 				st = selStyle
 			}
-			ranges = append(ranges, lipgloss.NewRange(m.colStart, m.colEnd, st))
+			ranges = append(ranges, lipgloss.NewRange(match.colStart, match.colEnd, st))
 		}
 		res[lineIdx] = lipgloss.StyleRanges(lines[lineIdx], ranges...)
 	}

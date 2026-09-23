@@ -190,6 +190,29 @@ func detectTerminalWidth() uint {
 	return 0
 }
 
+// resolveTableSettings resolves the effective table wrap/width settings.
+//
+// The snake_case keys (table_wrap, table_width) are an additional config-file
+// spelling. They must never override a flag that was passed explicitly, which is
+// why each fallback is gated on the flag's Changed state: reading them last,
+// ungated, silently inverts the usual flag > env > config > default precedence.
+//
+// changed is injected rather than read from a command so the rule can be tested
+// without mutating the global root command and its viper bindings.
+func resolveTableSettings(changed func(name string) bool) (wrap bool, width uint) {
+	wrap = viper.GetBool("tableWrap")
+	if !changed("table-wrap") && viper.IsSet("table_wrap") {
+		wrap = viper.GetBool("table_wrap")
+	}
+
+	width = viper.GetUint("tableWidth")
+	if !changed("table-width") && viper.IsSet("table_width") {
+		width = viper.GetUint("table_width")
+	}
+
+	return wrap, width
+}
+
 func validateOptions(cmd *cobra.Command) error {
 	// grab config values from Viper
 	width = viper.GetUint("width")
@@ -199,14 +222,8 @@ func validateOptions(cmd *cobra.Command) error {
 	showAllFiles = viper.GetBool("all")
 	preserveNewLines = viper.GetBool("preserveNewLines")
 	showLineNumbers = viper.GetBool("showLineNumbers")
-	tableWrap = viper.GetBool("tableWrap")
-	if viper.IsSet("table_wrap") {
-		tableWrap = viper.GetBool("table_wrap")
-	}
-	tableWidth = viper.GetUint("tableWidth")
-	if viper.IsSet("table_width") {
-		tableWidth = viper.GetUint("table_width")
-	}
+	// Precedence is CLI flag > environment > config file > default.
+	tableWrap, tableWidth = resolveTableSettings(cmd.Flags().Changed)
 
 	if pager && tui {
 		return errors.New("cannot use both pager and tui")
@@ -326,11 +343,7 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 	if preserveNewLines {
 		options = append(options, glamour.WithPreservedNewLines())
 	}
-	if !tableWrap {
-		options = append(options, glamour.WithTableWrap(false), glamour.WithTableWidth(int(tableWidth)))
-	} else if cmd.Flags().Changed("table-width") || viper.IsSet("tableWidth") {
-		options = append(options, glamour.WithTableWidth(int(tableWidth)))
-	}
+	options = append(options, utils.TableOptions(tableWrap, tableWidth)...)
 
 	r, err := glamour.NewTermRenderer(options...)
 	if err != nil {
@@ -445,8 +458,8 @@ func init() {
 	rootCmd.Flags().BoolVarP(&showLineNumbers, "line-numbers", "l", false, "show line numbers (TUI-mode only)")
 	rootCmd.Flags().BoolVarP(&preserveNewLines, "preserve-new-lines", "n", false, "preserve newlines in the output")
 	rootCmd.Flags().BoolVarP(&mouse, "mouse", "m", false, "enable mouse wheel (TUI-mode only)")
-	rootCmd.Flags().BoolVar(&tableWrap, "table-wrap", true, "wrap table cell content (use --table-wrap=false to keep tables unwrapped)")
-	rootCmd.Flags().UintVar(&tableWidth, "table-width", 0, "explicit width for tables (set to 0 for natural content width)")
+	rootCmd.Flags().BoolVar(&tableWrap, "table-wrap", true, "wrap table cells to the render width (use --table-wrap=false to render tables at their natural content width)")
+	rootCmd.Flags().UintVar(&tableWidth, "table-width", 0, "lay tables out at this width; 0 means natural content width")
 	_ = rootCmd.Flags().MarkHidden("mouse")
 
 	// Config bindings
@@ -461,6 +474,11 @@ func init() {
 	_ = viper.BindPFlag("all", rootCmd.Flags().Lookup("all"))
 	_ = viper.BindPFlag("tableWrap", rootCmd.Flags().Lookup("table-wrap"))
 	_ = viper.BindPFlag("tableWidth", rootCmd.Flags().Lookup("table-width"))
+
+	// Environment overrides. Viper resolves flag > env > config > default, so
+	// these sit above the config file but below the flags above.
+	_ = viper.BindEnv("tableWrap", "GLOW_TABLE_WRAP")
+	_ = viper.BindEnv("tableWidth", "GLOW_TABLE_WIDTH")
 
 	viper.SetDefault("style", "auto")
 	viper.SetDefault("width", 0)

@@ -45,11 +45,11 @@ type Styles struct {
 	helpViewStyle                  func(...string) string
 	lineNumberStyle                func(...string) string
 
-	dividerDot            lipgloss.Style
-	dividerBar            lipgloss.Style
-	logoStyle             lipgloss.Style
-	stashSpinnerStyle     lipgloss.Style
-	stashInputPromptStyle lipgloss.Style
+	dividerDot             lipgloss.Style
+	dividerBar             lipgloss.Style
+	logoStyle              lipgloss.Style
+	stashSpinnerStyle      lipgloss.Style
+	stashInputPromptStyle  lipgloss.Style
 	highlightStyle         lipgloss.Style
 	selectedHighlightStyle lipgloss.Style
 }
