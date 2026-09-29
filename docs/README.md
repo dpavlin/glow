@@ -53,6 +53,7 @@ under `/tmp/glow-local-checks`.
 
 | Area | Change |
 |---|---|
+| **TUI wrapping** | The TUI rendered before the window size was known, so glamour got `WithWordWrap(0)` and long lines were clipped by the (non-soft-wrapping) viewport. `Init()` no longer renders; the first `WindowSizeMsg` does, via a new `documentBody()` helper that caches the body for documents opened by path. Resize now follows the new width |
 | Table options | New `utils.TableOptions(wrap, width)` used by **both** the CLI and the TUI; `WithTableWidth(0)` is no longer sent when wrapping is on |
 | Precedence | `resolveTableSettings(changed)` — CLI flag now beats `table_wrap` / `table_width` in the config file |
 | Env | `viper.BindEnv` wired up, so `GLOW_TABLE_WRAP` / `GLOW_TABLE_WIDTH` actually work |
@@ -66,6 +67,7 @@ under `/tmp/glow-local-checks`.
 
 ## Status
 
+- ✅ `glow -t file.md` now wraps prose like the CLI does, at any terminal width.
 - ✅ `--table-wrap` / `--table-width` behave as documented, in CLI and TUI alike.
 - ✅ Config no longer overrides the command line; env vars work.
 - ✅ Search highlights land on the right text for non-ASCII content.

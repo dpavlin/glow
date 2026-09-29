@@ -26,6 +26,7 @@ Found by reviewing and then *measuring* the branch against `origin/main`
 | 16 | 🟡 | duplicated `searching \|\| filtering` checks | ✅ fixed (`inputActive()`) |
 | 17 | 🟡 | `xansi.Strip` per line per render | ❓ open |
 | 18 | 🟡 | `isTerminal` unused in the width branch | ❓ open (harmless) |
+| 19 | 🔴 | **TUI did not wrap prose** — rendered before the window size was known | ✅ fixed |
 
 ---
 
@@ -203,6 +204,58 @@ are cleared).
 | 15 | `helpView` | 9 rows with hard-coded padding (`"                             " + col1[9]`); brittle in short terminals |
 | 17 | `filterLines` / `findMatches` | `xansi.Strip` runs per line on every search/filter/re-render; caching stripped lines next to `fullLines` would help large documents |
 | 18 | `validateOptions` | `isTerminal` is no longer used inside the width-detection branch (still used for the `notty` style, so it compiles) |
+
+---
+
+## 🔴 #19 — The TUI rendered before the window size was known, so nothing wrapped
+
+**Symptom** — `glow file.md` wrapped prose correctly, `glow -t file.md` did not:
+paragraphs ran past the right edge and the tail of each line was simply gone.
+
+Measured on `ffzg-infra/procedures/new-wordpress-site.md` at 120 columns, before
+the fix (real screen, via `tmux capture-pane`):
+
+```
+  4  120 |  Standard operating procedure for standing up a new department, ... on the  ffzg.unizg.hr
+```
+
+The source sentence ends with "suffix." — that word was **lost**, because the line
+was clipped at the viewport edge rather than wrapped.
+
+**Root cause** — two things compounded:
+
+1. `ui.Init()` issued `renderWithGlamour()` immediately, before the first
+   `WindowSizeMsg`. In `glamourRender` the wrap width is
+   `min(GlamourMaxWidth, viewport.Width())`, and the viewport was still **0**
+   wide, so glamour got `WithWordWrap(0)` — wrapping disabled.
+2. The viewport has `SoftWrap == false` (so that unwrapped tables can scroll
+   horizontally), which means those long prose lines were **clipped** instead of
+   wrapped. Nothing re-rendered once the real size arrived: for a document opened
+   by path, `pager.currentDocument.Body` was never populated, so the pager's own
+   resize re-render rendered an empty string.
+
+**Fix** — three parts:
+
+- `ui.Init()` no longer renders. It only checks the file is readable. The
+  comment in the code says why: the wrap width is baked into the rendered
+  output, so rendering before the size is known bakes in zero.
+- `ui.Update()` on `WindowSizeMsg` renders the document once the width is
+  known, via a new `documentBody()` helper that reads and caches the body for
+  documents opened by path (this is also what makes **resize** follow the new
+  width).
+- `glamourRender()` falls back to `common.width` when the viewport is still
+  unsized, so no caller can accidentally disable wrapping again.
+
+Verified after the fix (real screen):
+
+```
+120 cols: line 4 = 118 cells, line 5 = "suffix."        (wrapped, nothing lost)
+ 90 cols: line 4 =  87 cells, line 5 = "website on ..."
+```
+
+Covered by `ui/render_test.go`:
+`TestGlamourRenderBeforeViewportIsSized` (fails without the fix: 215 cells),
+`TestGlamourRenderUsesViewportWidth`, `TestWindowSizeRerendersLoadedDocument`.
 
 ---
 
