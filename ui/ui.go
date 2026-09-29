@@ -165,16 +165,43 @@ func (m model) Init() tea.Cmd {
 	case stateShowStash:
 		cmds = append(cmds, findLocalFiles(*m.common))
 	case stateShowDocument:
-		content, err := os.ReadFile(m.common.cfg.Path)
-		if err != nil {
-			log.Error("unable to read file", "file", m.common.cfg.Path, "error", err)
-			return func() tea.Msg { return errMsg{err} }
+		// Rendering is deferred to the first WindowSizeMsg. The glamour word
+		// wrap is baked into the rendered output and the width is not known
+		// yet; rendering here would bake in zero, which disables wrapping and
+		// leaves long lines clipped by the viewport (the viewport does not
+		// soft-wrap). We only check that the document is readable so a missing
+		// file still surfaces as an error.
+		if m.common.cfg.Path != "" && m.pager.currentDocument.Body == "" {
+			if _, err := os.Stat(m.common.cfg.Path); err != nil {
+				log.Error("unable to read file", "file", m.common.cfg.Path, "error", err)
+				return func() tea.Msg { return errMsg{err} }
+			}
 		}
-		body := string(utils.RemoveFrontmatter(content))
-		cmds = append(cmds, renderWithGlamour(m.pager, body))
 	}
 
 	return tea.Batch(cmds...)
+}
+
+// documentBody returns the body of the document currently being displayed,
+// reading and caching it from disk when the document was opened by path. The
+// pager needs it for re-rendering on resize, and for the file path that body is
+// not populated up front.
+func (m *model) documentBody() (string, error) {
+	if m.pager.currentDocument.Body != "" {
+		return m.pager.currentDocument.Body, nil
+	}
+	if m.common.cfg.Path == "" {
+		return "", nil
+	}
+
+	content, err := os.ReadFile(m.common.cfg.Path)
+	if err != nil {
+		return "", err
+	}
+
+	body := string(utils.RemoveFrontmatter(content))
+	m.pager.currentDocument.Body = body
+	return body, nil
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -257,6 +284,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.common.height = msg.Height
 		m.stash.setSize(msg.Width, msg.Height)
 		m.pager.setSize(msg.Width, msg.Height)
+
+		// The glamour word wrap is baked into the rendered output from the
+		// viewport width, so the document has to be (re)rendered once the size
+		// is known. Init() deliberately does not render for this reason. This is
+		// also what makes wrapping follow a terminal resize.
+		if m.state == stateShowDocument {
+			if body, err := m.documentBody(); err == nil && body != "" {
+				cmds = append(cmds, renderWithGlamour(m.pager, body))
+			}
+		}
 
 	case initLocalFileSearchMsg:
 		m.localFileFinder = msg.ch

@@ -679,7 +679,19 @@ func glamourRender(m pagerModel, markdown string) (string, error) {
 	}
 
 	isCode := !utils.IsMarkdownFile(m.currentDocument.Note)
-	width := max(0, min(int(m.common.cfg.GlamourMaxWidth), m.viewport.Width())) //nolint:gosec
+
+	// The glamour word wrap is baked into the rendered output, so it has to be
+	// derived from a width we actually know. Init() renders the document before
+	// the first WindowSizeMsg arrives, at which point the viewport is still 0
+	// wide; falling back to the terminal width keeps that first render from
+	// disabling wrapping entirely (which leaves long lines clipped by the
+	// viewport instead of wrapped, since the viewport does not soft-wrap).
+	renderWidth := m.viewport.Width()
+	if renderWidth <= 0 {
+		renderWidth = m.common.width
+	}
+
+	width := max(0, min(int(m.common.cfg.GlamourMaxWidth), renderWidth)) //nolint:gosec
 	if isCode {
 		width = 0
 	}
