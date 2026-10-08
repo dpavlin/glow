@@ -184,12 +184,15 @@ func TestLineFilter(t *testing.T) {
 		t.Fatal("expected valid regex")
 	}
 
-	filtered := filterLines(re, lines)
+	filtered, indices := filterLines(re, lines)
 	if len(filtered) != 2 {
 		t.Fatalf("expected 2 filtered lines, got %d: %v", len(filtered), filtered)
 	}
 	if filtered[0] != "apple pie" || filtered[1] != "apple tart" {
 		t.Fatalf("unexpected filtered lines: %v", filtered)
+	}
+	if len(indices) != 2 || indices[0] != 0 || indices[1] != 2 {
+		t.Fatalf("unexpected indices: %v", indices)
 	}
 }
 
@@ -199,7 +202,7 @@ func TestLineFilterIgnoresAnsi(t *testing.T) {
 		"\x1b[31merror\x1b[0m: boom",
 		"\x1b[32mfine\x1b[0m",
 	}
-	filtered := filterLines(compileSearchRegex("error"), lines)
+	filtered, _ := filterLines(compileSearchRegex("error"), lines)
 	if len(filtered) != 1 {
 		t.Fatalf("expected 1 filtered line, got %d: %v", len(filtered), filtered)
 	}

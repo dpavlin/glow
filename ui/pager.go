@@ -68,9 +68,10 @@ type pagerModel struct {
 
 	// Filter state. filterRE is the compiled filterPattern, cached so that
 	// re-rendering (resize, reload, edit) does not recompile it.
-	filterPattern string
-	filterRE      *regexp.Regexp
-	filteredLines []string
+	filterPattern   string
+	filterRE        *regexp.Regexp
+	filteredLines   []string
+	filteredIndices []int
 
 	// Search state. searchRE is the compiled searchPattern, cached for the same
 	// reason. Match positions are display-cell coordinates, not byte offsets.
@@ -89,6 +90,7 @@ type pagerModel struct {
 func newPagerModel(common *commonModel) pagerModel {
 	// Init viewport
 	vp := viewport.New()
+	vp.SoftWrap = false
 
 	promptInput := textinput.New()
 	promptInput.Prompt = "/"
@@ -110,12 +112,39 @@ func newPagerModel(common *commonModel) pagerModel {
 	return m
 }
 
+func (m *pagerModel) updateGutter() {
+	isCode := !utils.IsMarkdownFile(m.currentDocument.Note)
+	if isCode || m.common.cfg.ShowLineNumbers {
+		total := len(m.fullLines)
+		numDigits := 3
+		if total > 0 {
+			numDigits = max(3, len(fmt.Sprint(total)))
+		}
+		gutterFmt := fmt.Sprintf("%%%dd ", numDigits)
+		emptyGutter := strings.Repeat(" ", numDigits+1)
+
+		m.viewport.LeftGutterFunc = func(info viewport.GutterContext) string {
+			if info.Soft || info.Index >= len(m.baseLines()) {
+				return m.common.styles.lineNumberStyle(emptyGutter)
+			}
+			lineNum := info.Index + 1
+			if m.isFiltered() && info.Index < len(m.filteredIndices) {
+				lineNum = m.filteredIndices[info.Index] + 1
+			}
+			return m.common.styles.lineNumberStyle(fmt.Sprintf(gutterFmt, lineNum))
+		}
+	} else {
+		m.viewport.LeftGutterFunc = viewport.NoGutter
+	}
+}
+
 func (m *pagerModel) updateStyles(styles Styles) {
 	tsi := m.promptInput.Styles()
 	tsi.Focused.Prompt = styles.stashInputPromptStyle
 	tsi.Blurred.Prompt = styles.stashInputPromptStyle
 	tsi.Cursor.Color = styles.fuchsia
 	m.promptInput.SetStyles(tsi)
+	m.updateGutter()
 	if m.hasSearchHighlights() {
 		m.updateDisplayedContent()
 	}
@@ -167,11 +196,12 @@ func (m *pagerModel) updateDisplayedContent() {
 func (m *pagerModel) setContent(s string) {
 	m.fullLines = strings.Split(s, "\n")
 	if m.isFiltered() && m.filterRE != nil {
-		m.filteredLines = filterLines(m.filterRE, m.fullLines)
+		m.filteredLines, m.filteredIndices = filterLines(m.filterRE, m.fullLines)
 	}
 	if m.searchRE != nil {
 		m.recomputeSearchMatches()
 	}
+	m.updateGutter()
 	m.updateDisplayedContent()
 }
 
@@ -214,6 +244,7 @@ func (m *pagerModel) unload() {
 	m.state = pagerStateBrowse
 	m.fullLines = nil
 	m.filteredLines = nil
+	m.filteredIndices = nil
 	m.filterPattern = ""
 	m.filterRE = nil
 	m.searchMatches = nil
@@ -223,6 +254,7 @@ func (m *pagerModel) unload() {
 	m.viewport.SetContent("")
 	m.viewport.SetYOffset(0)
 	m.viewport.SetXOffset(0)
+	m.viewport.LeftGutterFunc = viewport.NoGutter
 	m.unwatchFile()
 }
 
@@ -326,6 +358,16 @@ func (m pagerModel) update(msg tea.Msg) (pagerModel, tea.Cmd) {
 		case "r":
 			return m, loadLocalMarkdown(&m.currentDocument)
 
+		case "S", "alt+s":
+			m.viewport.SoftWrap = !m.viewport.SoftWrap
+			if m.viewport.SoftWrap {
+				m.viewport.SetXOffset(0)
+				cmds = append(cmds, m.showStatusMessage(pagerStatusMessage{"Fold long lines on", false}))
+			} else {
+				cmds = append(cmds, m.showStatusMessage(pagerStatusMessage{"Fold long lines off", false}))
+			}
+			return m, tea.Batch(cmds...)
+
 		case "?":
 			m.toggleHelp()
 		}
@@ -423,7 +465,7 @@ func (m *pagerModel) submitFilter() (pagerModel, tea.Cmd) {
 		return *m, nil
 	}
 
-	filtered := filterLines(re, m.fullLines)
+	filtered, indices := filterLines(re, m.fullLines)
 	if len(filtered) == 0 {
 		m.state = pagerStateBrowse
 		return *m, m.showStatusMessage(pagerStatusMessage{fmt.Sprintf("No matching lines: %s", pattern), false})
@@ -432,7 +474,9 @@ func (m *pagerModel) submitFilter() (pagerModel, tea.Cmd) {
 	m.filterPattern = pattern
 	m.filterRE = re
 	m.filteredLines = filtered
+	m.filteredIndices = indices
 	m.recomputeSearchMatches()
+	m.updateGutter()
 	m.updateDisplayedContent()
 	m.viewport.GotoTop()
 	m.state = pagerStateBrowse
@@ -467,7 +511,9 @@ func (m *pagerModel) clearFilter() {
 	m.filterPattern = ""
 	m.filterRE = nil
 	m.filteredLines = nil
+	m.filteredIndices = nil
 	m.recomputeSearchMatches()
+	m.updateGutter()
 	m.updateDisplayedContent()
 }
 
@@ -577,6 +623,9 @@ func (m pagerModel) statusBarView(b *strings.Builder) {
 		case len(m.searchMatches) > 0:
 			note = fmt.Sprintf("%s • [%d/%d] /%s", note, matchPos, len(m.searchMatches), m.searchPattern)
 		}
+		if m.viewport.SoftWrap {
+			note = fmt.Sprintf("%s • [folded]", note)
+		}
 	}
 	note = truncate.StringWithTail(" "+note+" ", uint(max(0, //nolint:gosec
 		m.common.width-
@@ -619,6 +668,7 @@ func (m pagerModel) helpView() (s string) {
 		"/       search",
 		"n/N     next/prev match",
 		"&       filter lines",
+		"S       toggle line folding",
 		"g/home  go to top",
 		"G/end   go to bottom",
 		"c       copy contents",
@@ -638,7 +688,8 @@ func (m pagerModel) helpView() (s string) {
 	s += "u        ½ page up           " + col1[6] + "\n"
 	s += "d        ½ page down         " + col1[7] + "\n"
 	s += "                             " + col1[8] + "\n"
-	s += "                             " + col1[9]
+	s += "                             " + col1[9] + "\n"
+	s += "                             " + col1[10]
 
 	s = indent(s, 2)
 
@@ -672,8 +723,6 @@ func renderWithGlamour(m pagerModel, md string) tea.Cmd {
 
 // This is where the magic happens.
 func glamourRender(m pagerModel, markdown string) (string, error) {
-	trunc := lipgloss.NewStyle().MaxWidth(m.viewport.Width() - lineNumberWidth).Render
-
 	if !m.common.cfg.GlamourEnabled {
 		return markdown, nil
 	}
@@ -723,25 +772,7 @@ func glamourRender(m pagerModel, markdown string) (string, error) {
 		out = strings.TrimSpace(out)
 	}
 
-	// trim lines
-	lines := strings.Split(out, "\n")
-
-	var content strings.Builder
-	for i, s := range lines {
-		if isCode || m.common.cfg.ShowLineNumbers {
-			content.WriteString(m.common.styles.lineNumberStyle(fmt.Sprintf("%"+fmt.Sprint(lineNumberWidth)+"d", i+1)))
-			content.WriteString(trunc(s))
-		} else {
-			content.WriteString(s)
-		}
-
-		// don't add an artificial newline after the last split
-		if i+1 < len(lines) {
-			content.WriteRune('\n')
-		}
-	}
-
-	return content.String(), nil
+	return out, nil
 }
 
 func (m *pagerModel) initWatcher() {
@@ -801,14 +832,16 @@ func (m *pagerModel) localDir() string {
 
 // filterLines keeps the lines whose visible text matches re. The surviving lines
 // are returned untouched, so glamour's styling on them is preserved.
-func filterLines(re *regexp.Regexp, lines []string) []string {
+func filterLines(re *regexp.Regexp, lines []string) ([]string, []int) {
 	filtered := make([]string, 0, len(lines))
-	for _, line := range lines {
+	indices := make([]int, 0, len(lines))
+	for i, line := range lines {
 		if re.MatchString(xansi.Strip(line)) {
 			filtered = append(filtered, line)
+			indices = append(indices, i)
 		}
 	}
-	return filtered
+	return filtered, indices
 }
 
 // findMatches locates every occurrence of re in lines and returns the positions

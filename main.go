@@ -46,6 +46,7 @@ var (
 	mouse            bool
 	tableWrap        bool
 	tableWidth       uint
+	chopLongLines    bool
 
 	rootCmd = &cobra.Command{
 		Use:   "glow [SOURCE|DIR]",
@@ -222,6 +223,7 @@ func validateOptions(cmd *cobra.Command) error {
 	showAllFiles = viper.GetBool("all")
 	preserveNewLines = viper.GetBool("preserveNewLines")
 	showLineNumbers = viper.GetBool("showLineNumbers")
+	chopLongLines = viper.GetBool("chopLongLines")
 	// Precedence is CLI flag > environment > config file > default.
 	tableWrap, tableWidth = resolveTableSettings(cmd.Flags().Changed)
 
@@ -361,6 +363,8 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 		return fmt.Errorf("unable to render markdown: %w", err)
 	}
 
+	isTerminal := term.IsTerminal(int(os.Stdout.Fd()))
+
 	// display
 	switch {
 	case pager || cmd.Flags().Changed("pager"):
@@ -373,6 +377,18 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 		if err != nil || len(fields) == 0 {
 			return fmt.Errorf("unable to parse PAGER command: %s", pagerCmd)
 		}
+		if chopLongLines && fields[0] == "less" {
+			hasS := false
+			for _, f := range fields[1:] {
+				if f == "-S" || strings.Contains(f, "S") {
+					hasS = true
+					break
+				}
+			}
+			if !hasS {
+				fields = append(fields, "-S")
+			}
+		}
 		c := exec.Command(fields[0], fields[1:]...) //nolint:gosec
 		c.Stdin = strings.NewReader(out)
 		c.Stdout = os.Stdout
@@ -380,7 +396,7 @@ func executeCLI(cmd *cobra.Command, src *source, w io.Writer) error {
 			return fmt.Errorf("unable to run command: %w", err)
 		}
 		return nil
-	case tui || cmd.Flags().Changed("tui"):
+	case isTerminal && (tui || cmd.Flags().Changed("tui")):
 		path := ""
 		if !isURL(src.URL) {
 			path = src.URL
@@ -414,6 +430,7 @@ func runTUI(path string, content string) error {
 	cfg.PreserveNewLines = preserveNewLines
 	cfg.TableWrap = tableWrap
 	cfg.TableWidth = tableWidth
+	cfg.ChopLongLines = chopLongLines
 
 	// Run Bubble Tea program
 	if _, err := ui.NewProgram(cfg, content).Run(); err != nil {
@@ -458,6 +475,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&showLineNumbers, "line-numbers", "l", false, "show line numbers (TUI-mode only)")
 	rootCmd.Flags().BoolVarP(&preserveNewLines, "preserve-new-lines", "n", false, "preserve newlines in the output")
 	rootCmd.Flags().BoolVarP(&mouse, "mouse", "m", false, "enable mouse wheel (TUI-mode only)")
+	rootCmd.Flags().BoolVarP(&chopLongLines, "chop-long-lines", "S", false, "truncate long lines instead of wrapping (like less -S)")
 	rootCmd.Flags().BoolVar(&tableWrap, "table-wrap", true, "wrap table cells to the render width (use --table-wrap=false to render tables at their natural content width)")
 	rootCmd.Flags().UintVar(&tableWidth, "table-width", 0, "lay tables out at this width; 0 means natural content width")
 	_ = rootCmd.Flags().MarkHidden("mouse")
@@ -472,6 +490,7 @@ func init() {
 	_ = viper.BindPFlag("preserveNewLines", rootCmd.Flags().Lookup("preserve-new-lines"))
 	_ = viper.BindPFlag("showLineNumbers", rootCmd.Flags().Lookup("line-numbers"))
 	_ = viper.BindPFlag("all", rootCmd.Flags().Lookup("all"))
+	_ = viper.BindPFlag("chopLongLines", rootCmd.Flags().Lookup("chop-long-lines"))
 	_ = viper.BindPFlag("tableWrap", rootCmd.Flags().Lookup("table-wrap"))
 	_ = viper.BindPFlag("tableWidth", rootCmd.Flags().Lookup("table-width"))
 
@@ -479,12 +498,14 @@ func init() {
 	// these sit above the config file but below the flags above.
 	_ = viper.BindEnv("tableWrap", "GLOW_TABLE_WRAP")
 	_ = viper.BindEnv("tableWidth", "GLOW_TABLE_WIDTH")
+	_ = viper.BindEnv("chopLongLines", "GLOW_CHOP_LONG_LINES")
 
 	viper.SetDefault("style", "auto")
 	viper.SetDefault("width", 0)
 	viper.SetDefault("all", true)
 	viper.SetDefault("tableWrap", true)
 	viper.SetDefault("tableWidth", 0)
+	viper.SetDefault("chopLongLines", false)
 
 	rootCmd.AddCommand(configCmd, manCmd)
 }

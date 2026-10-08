@@ -12,6 +12,7 @@ type Config struct {
 	PreserveNewLines bool
 	TableWrap        bool `env:"GLOW_TABLE_WRAP" envDefault:"true"`
 	TableWidth       uint `env:"GLOW_TABLE_WIDTH"`
+	ChopLongLines    bool `env:"GLOW_CHOP_LONG_LINES"`
 
 	// Working directory or file path
 	Path string
